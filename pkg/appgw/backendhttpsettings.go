@@ -133,6 +133,24 @@ func (c *appGwConfigBuilder) resolveBackendPort(backendID backendIdentifier) (Po
 		servicePortInIngress = fmt.Sprint(backendID.Backend.Service.Port.Name)
 	}
 
+	var backendPort Port
+	if useLoadBalancer, err := annotations.UseLoadBalancer(backendID.Ingress); err == nil && useLoadBalancer {
+		for _, servicePort := range service.Spec.Ports {
+			if servicePort.Protocol != v1.ProtocolTCP {
+				continue
+			}
+
+			if servicePort.Port == backendID.Backend.Service.Port.Number {
+				backendPort = Port(backendID.Backend.Service.Port.Number)
+				return backendPort, nil
+			}
+		}
+		return backendPort, controllererrors.NewErrorf(
+			controllererrors.ErrorServiceResolvedToInvalidPort,
+			"Service resolved to invalid port %s",
+			backendID.serviceKey())
+	}
+
 	resolvedBackendPorts := make(map[serviceBackendPortPair]interface{})
 	for _, servicePort := range service.Spec.Ports {
 		// ignore UDP ports
@@ -182,7 +200,7 @@ func (c *appGwConfigBuilder) resolveBackendPort(backendID backendIdentifier) (Po
 		}
 	}
 
-	backendPort := Port(65536)
+	backendPort = Port(65536)
 	if len(resolvedBackendPorts) == 0 {
 		e = controllererrors.NewErrorf(
 			controllererrors.ErrorUnableToResolveBackendPortFromServicePort,

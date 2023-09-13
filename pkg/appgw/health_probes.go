@@ -126,6 +126,15 @@ func (c *appGwConfigBuilder) generateHealthProbe(backendID backendIdentifier) *n
 		}
 		if len(k8sProbeForServiceContainer.Handler.HTTPGet.Port.String()) != 0 {
 			probe.Port = to.Int32Ptr(k8sProbeForServiceContainer.Handler.HTTPGet.Port.IntVal)
+			// If we're using the load balancer, we want the container's
+			// health path but the *service's* port.
+			if useLoadBalancer, err := annotations.UseLoadBalancer(backendID.Ingress); err == nil && useLoadBalancer {
+				if useLoadBalancer {
+					if port, err := c.resolveBackendPort(backendID); err == nil {
+						probe.Port = to.Int32Ptr(int32(port))
+					}
+				}
+			}
 		}
 		if k8sProbeForServiceContainer.Handler.HTTPGet.Scheme == v1.URISchemeHTTPS {
 			probe.Protocol = n.ApplicationGatewayProtocolHTTPS

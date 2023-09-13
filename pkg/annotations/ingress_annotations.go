@@ -111,6 +111,9 @@ const (
 
 	// RequestRoutingRulePriority indicates the priority of the Request Routing Rules.
 	RequestRoutingRulePriority = ApplicationGatewayPrefix + "/rule-priority"
+
+	// UseLoadBalancer indicates the ingress should pass traffic through the kubernetes service's load balancer
+	UseLoadBalancerKey = ApplicationGatewayPrefix + "/use-load-balancer"
 )
 
 // ProtocolEnum is the type for protocol
@@ -322,6 +325,11 @@ func GetRequestRoutingRulePriority(ing *networking.Ingress) (*int32, error) {
 	}
 
 	return nil, err
+}
+
+// UseLoadBalancer
+func UseLoadBalancer(ing *networking.Ingress) (bool, error) {
+	return parseBool(ing, UseLoadBalancerKey)
 }
 
 func parseBool(ing *networking.Ingress, name string) (bool, error) {

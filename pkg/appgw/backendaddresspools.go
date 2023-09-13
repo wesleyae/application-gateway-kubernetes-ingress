@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/Azure/application-gateway-kubernetes-ingress/pkg/annotations"
 	"github.com/Azure/application-gateway-kubernetes-ingress/pkg/brownfield"
 	"github.com/Azure/application-gateway-kubernetes-ingress/pkg/events"
 	"github.com/Azure/application-gateway-kubernetes-ingress/pkg/sorter"
@@ -97,28 +98,56 @@ func (c *appGwConfigBuilder) newBackendPoolMap(cbCtx *ConfigBuilderContext) map[
 }
 
 func (c *appGwConfigBuilder) getBackendAddressPool(backendID backendIdentifier, serviceBackendPair serviceBackendPortPair, addressPools map[string]*n.ApplicationGatewayBackendAddressPool) *n.ApplicationGatewayBackendAddressPool {
-	endpoints, err := c.k8sContext.GetEndpointsByService(backendID.serviceKey())
-	if err != nil {
-		klog.Errorf(err.Error())
-		c.recorder.Event(backendID.Ingress, v1.EventTypeWarning, events.ReasonEndpointsEmpty, err.Error())
-		return nil
-	}
 
-	for _, subset := range endpoints.Subsets {
-		if _, portExists := getUniqueTCPPorts(subset)[serviceBackendPair.BackendPort]; portExists {
+	if useLoadBalancer, err := annotations.UseLoadBalancer(backendID.Ingress); err == nil && useLoadBalancer {
+		service := c.k8sContext.GetService(backendID.serviceKey())
+
+		if _, portExists := getUniqueTCPPortsFromService(&service.Spec.Ports)[serviceBackendPair.BackendPort]; portExists {
 			poolName := generateAddressPoolName(backendID.serviceFullName(), serviceBackendPortToStr(backendID.Backend.Service.Port), serviceBackendPair.BackendPort)
 			// The same service might be referenced in multiple ingress resources, this might result in multiple `serviceBackendPairMap` having the same service key but different
 			// ingress resource. Thus, while generating the backend address pool, we should make sure that we are generating unique backend address pools.
 			if pool, ok := addressPools[poolName]; ok {
 				return pool
 			}
-			return c.newPool(poolName, subset)
+			return c.newPoolForLoadBalancerIngresses(poolName, &service.Status.LoadBalancer.Ingress)
 		}
-		logLine := fmt.Sprintf("Backend target port %d does not have matching endpoint port", serviceBackendPair.BackendPort)
+		logLine := fmt.Sprintf("Backend target port %d does not have matching service port", serviceBackendPair.BackendPort)
 		klog.Error(logLine)
 		c.recorder.Event(backendID.Ingress, v1.EventTypeWarning, events.ReasonBackendPortTargetMatch, logLine)
+	} else {
+		endpoints, err := c.k8sContext.GetEndpointsByService(backendID.serviceKey())
+		if err != nil {
+			klog.Errorf(err.Error())
+			c.recorder.Event(backendID.Ingress, v1.EventTypeWarning, events.ReasonEndpointsEmpty, err.Error())
+			return nil
+		}
+
+		for _, subset := range endpoints.Subsets {
+			if _, portExists := getUniqueTCPPorts(subset)[serviceBackendPair.BackendPort]; portExists {
+				poolName := generateAddressPoolName(backendID.serviceFullName(), serviceBackendPortToStr(backendID.Backend.Service.Port), serviceBackendPair.BackendPort)
+				// The same service might be referenced in multiple ingress resources, this might result in multiple `serviceBackendPairMap` having the same service key but different
+				// ingress resource. Thus, while generating the backend address pool, we should make sure that we are generating unique backend address pools.
+				if pool, ok := addressPools[poolName]; ok {
+					return pool
+				}
+				return c.newPool(poolName, subset)
+			}
+			logLine := fmt.Sprintf("Backend target port %d does not have matching endpoint port", serviceBackendPair.BackendPort)
+			klog.Error(logLine)
+			c.recorder.Event(backendID.Ingress, v1.EventTypeWarning, events.ReasonBackendPortTargetMatch, logLine)
+		}
 	}
 	return nil
+}
+
+func getUniqueTCPPortsFromService(svcPorts *[]v1.ServicePort) map[Port]interface{} {
+	ports := make(map[Port]interface{})
+	for _, p := range *svcPorts {
+		if p.Protocol == v1.ProtocolTCP {
+			ports[Port(p.Port)] = nil
+		}
+	}
+	return ports
 }
 
 func getUniqueTCPPorts(subset v1.EndpointSubset) map[Port]interface{} {
@@ -131,6 +160,17 @@ func getUniqueTCPPorts(subset v1.EndpointSubset) map[Port]interface{} {
 	return ports
 }
 
+func (c *appGwConfigBuilder) newPoolForLoadBalancerIngresses(poolName string, ingresses *[]v1.LoadBalancerIngress) *n.ApplicationGatewayBackendAddressPool {
+	return &n.ApplicationGatewayBackendAddressPool{
+		Etag: to.StringPtr("*"),
+		Name: &poolName,
+		ID:   to.StringPtr(c.appGwIdentifier.AddressPoolID(poolName)),
+		ApplicationGatewayBackendAddressPoolPropertiesFormat: &n.ApplicationGatewayBackendAddressPoolPropertiesFormat{
+			BackendAddresses: getAddressesForLoadBalancerIngresses(ingresses),
+		},
+	}
+}
+
 func (c *appGwConfigBuilder) newPool(poolName string, subset v1.EndpointSubset) *n.ApplicationGatewayBackendAddressPool {
 	return &n.ApplicationGatewayBackendAddressPool{
 		Etag: to.StringPtr("*"),
@@ -140,6 +180,15 @@ func (c *appGwConfigBuilder) newPool(poolName string, subset v1.EndpointSubset) 
 			BackendAddresses: getAddressesForSubset(subset),
 		},
 	}
+}
+
+func getAddressesForLoadBalancerIngresses(ingresses *[]v1.LoadBalancerIngress) *[]n.ApplicationGatewayBackendAddress {
+	addrSet := make(map[n.ApplicationGatewayBackendAddress]interface{})
+	for _, ingress := range *ingresses {
+		addrSet[n.ApplicationGatewayBackendAddress{IPAddress: to.StringPtr(ingress.IP)}] = nil
+	}
+
+	return getBackendAddressMapKeys(&addrSet)
 }
 
 func getAddressesForSubset(subset v1.EndpointSubset) *[]n.ApplicationGatewayBackendAddress {
